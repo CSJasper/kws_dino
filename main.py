@@ -104,10 +104,22 @@ def main(screen: pygame.Surface):
 
         score()
 
-        # start recording
+        # start recording (use busy waiting)
         if time.time() - start_time >= 0.25:
-            
-
+            listener = AudioCapture.ready_queue.pop(0)
+            listener.is_ready = False
+            AudioCapture.running_queue.append(listener)
+            listener.is_running = True
+            listener.is_listening = True
+            start_time = time.time()
+        # check running queue
+        while True:
+            task = AudioCapture.running_queue[0]
+            if task.is_running:
+                break
+            # not running
+            AudioCapture.ready_queue.append(task)
+            _ = AudioCapture.running_queue.pop(0)
 
         # do depending on output result
 
