@@ -86,7 +86,7 @@ def get_vad_flag(input_chunk):
 def start_KWS(Queue_audio, model: torch.nn.Module):
     chunk_list = []
     while not command_queue.empty():
-        command_queue.get_nowait()
+        command_queue.get()
     print('Listening start')
     while record:
         chunk = Queue_audio.get()
@@ -220,15 +220,13 @@ def main(screen: pygame.Surface):
         screen.fill((255, 255, 255))
         userInput = {pygame.K_UP: False, pygame.K_DOWN: False}
         # 점프 0 뛰어 1 숙여 2 nothing 4
-        if time.time() - start_time >= 1.0:
-            command = command_queue.get()
-            if command == 0 or command == 1:
-                userInput[pygame.K_UP] = True
-            elif command == 2:
-                userInput[pygame.K_DOWN] = True
-            start_time = time.time()
+        command = command_queue.get()
+        if command == 0 or command == 1:
+            userInput[pygame.K_UP] = True
+        elif command == 2:
+            userInput[pygame.K_DOWN] = True
 
-        print(f'keyUP: {userInput[pygame.K_UP]}, keyDown: {userInput[pygame.K_DOWN]}')
+        #print(f'keyUP: {userInput[pygame.K_UP]}, keyDown: {userInput[pygame.K_DOWN]}')
 
 
         background()
@@ -261,7 +259,7 @@ def main(screen: pygame.Surface):
                 '''
 
 
-        clock.tick(30)
+        clock.tick(60)
         pygame.display.update()
 
 
