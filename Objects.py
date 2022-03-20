@@ -1,6 +1,7 @@
 import os
 import pygame
 import random
+import torch
 
 RUNNING = [
     pygame.image.load(os.path.join('Assets/Dino', 'DinoRun1.png')),
@@ -58,7 +59,6 @@ class Dinosaur:
         self.dino_rect.x = self.X_POS
         self.dino_rect.y = self.Y_POS
 
-
     def update(self, userInput):
         if self.dino_duck:
             self.duck()
@@ -82,6 +82,7 @@ class Dinosaur:
             self.dino_duck = False
             self.dino_run = True
             self.dino_jump = False
+
 
     def duck(self):
         self.image = self.duck_img[self.step_index // 5]

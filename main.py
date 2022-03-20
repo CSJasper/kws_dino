@@ -1,5 +1,3 @@
-import os.path
-
 import pygame
 from Objects import Dinosaur
 from Objects import Cloud
@@ -10,13 +8,17 @@ from Objects import Bird
 import random
 from Objects import RUNNING
 
-from audiocapture import AudioCapture
 
-from detect import detect, _detect
-from detect import load_on_memory
-
+import numpy as np
+import pyaudio
 import threading
+from multiprocessing import Queue
+import torchaudio
+import torch
 import time
+
+
+import sys
 
 pygame.init()
 
@@ -27,26 +29,146 @@ screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 
 points = 0
 run = True
+record = False
+SR = 16000
+CHUNK_SIZE = SR // 4
+Queue_audio = Queue()
+command_queue = Queue()
+now_recording = False
 
-AUDIO_FILE_NAME = ''  # name for recorded audio file (*.wav)
+## -- 1. load model
+model_path = "./results/best_model.pt"
+model = torch.load(model_path)
+model.eval()
 
-if not TEST:
-    model = load_on_memory()  # model to be loaded on memory
+## -- 2. load support data
+support_path = "./support.pt"
+xs = torch.load(support_path)  # [3, 10, 1, 51, 40], [3-way, 10-shots, 1, T, f]
 
-CAPTURE1_FILENAME = './audio1.wav'
-CAPTURE2_FILENAME = './audio2.wav'
-CAPTURE3_FILENAME = './audio3.wav'
-CAPTURE4_FILENAME = './audio4.wav'
-capture_dict = {'capture1': AudioCapture(filename=CAPTURE1_FILENAME, sr=16000, channel_num=1),
-                'capture2': AudioCapture(filename=CAPTURE2_FILENAME, sr=16000, channel_num=1),
-                'capture3': AudioCapture(filename=CAPTURE3_FILENAME, sr=16000, channel_num=1),
-                'capture4': AudioCapture(filename=CAPTURE4_FILENAME, sr=16000, channel_num=1)}
-threads_list = []
 
+def inference(input_chunk, model: torch.nn.Module):
+    # normalize
+    input_chunk = input_chunk.astype(np.float32)
+    input_chunk = input_chunk / (np.max(input_chunk) - np.min(input_chunk))
+
+    # numpy to tensor, extract mfcc feature
+    input_chunk = torch.tensor(input_chunk)
+    xq = extract_features(input_chunk)  # [1. 51. 40] , [1 , T, f]
+    xq = xq.unsqueeze(0)
+    xq = xq.unsqueeze(0)  # [1,1,1,51,40]
+
+    sample = {}
+    sample['xs'] = xs
+    sample['xq'] = xq
+
+    output = model.loss(sample)
+    return output
+
+
+def generate_input_chunk(input_chunk_segment):
+    for i in range(len(input_chunk_segment)):
+        if i == 0:
+            input_chunk = input_chunk_segment[i]
+        else:
+            input_chunk = np.concatenate([input_chunk, input_chunk_segment[i]], axis = 1)
+    return input_chunk
+
+
+def get_vad_flag(input_chunk):
+    power = np.abs(input_chunk).mean()
+    if power >= 1000:
+        vad = True
+    else:
+        vad = False
+    return vad
+
+
+def start_KWS(Queue_audio, model: torch.nn.Module):
+    chunk_list = []
+    while not command_queue.empty():
+        command_queue.get_nowait()
+    print('Listening start')
+    while record:
+        chunk = Queue_audio.get()
+        chunk_list.append(chunk)
+
+        if len(chunk_list) >= 4:
+            input_chunk = generate_input_chunk(chunk_list[:4]) # select last 4 chunk and concat them so as to make 1 sec input
+            del chunk_list[0]
+
+            vad = get_vad_flag(input_chunk)
+            #print(vad)
+
+            if vad:
+                output = inference(input_chunk, model)
+            else:
+                output = torch.tensor([4])
+            #print(output)
+            command_queue.put(output.numpy())
+    print('Listening stopped')
+
+
+def start_stream(Queue_audio, stream):
+    global now_recording
+    if now_recording:
+        return
+    while record:
+        now_recording = True
+        data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+        data = np.fromstring(data, dtype=np.int16)
+        data = np.expand_dims(data, axis=0) # [1, 4000]
+
+        Queue_audio.put(data)
+    now_recording = False
+
+
+## hyperparameters used for extracting MFCC feature
+window_size_ms = 40
+window_stride_ms = 20
+sample_rate = 16000
+feature_bin_count = 40
+
+
+def build_mfcc_extractor():
+    frame_len = window_size_ms / 1000
+    stride = window_stride_ms / 1000
+    mfcc = torchaudio.transforms.MFCC(sample_rate,
+                                    n_mfcc=feature_bin_count,
+                                    melkwargs={
+                                        'hop_length' : int(stride*sample_rate),
+                                        'n_fft' : int(frame_len*sample_rate)})
+    return mfcc
+
+
+mfcc = build_mfcc_extractor()
+
+
+def extract_features(sound):
+    features = mfcc(sound)[0] # just one channel
+    features = features.T # f x t -> t x f
+    features = torch.unsqueeze(features, 0)
+    return features
+
+
+def check_audio_env(pypy):
+    print('============================================')
+    print(pypy.get_device_count())
+    print('============================================')
+    for index in range(pypy.get_device_count()):
+        desc = pypy.get_device_info_by_index(index)
+        print("DEVICE: %s INDEX: %s RATE:%s"%(desc['name'],index,int(desc["defaultSampleRate"])))
+
+
+def get_audio_env_list(pypy):
+    audio_env_list = []
+    for index in range(pypy.get_device_count()):
+        desc = pypy.get_device_info_by_index(index)
+        audio_env_list.append(f'DEVICE: {desc["name"]} INDEX: {index}, SR: {int(desc["defaultSampleRate"])}')
+    return audio_env_list
 
 
 def main(screen: pygame.Surface):
-    global SCREEN_WIDTH, points, run, model, capture_dict
+    global SCREEN_WIDTH, points, run, record
     clock = pygame.time.Clock()
     player = Dinosaur()
     cloud = Cloud(SCREEN_WIDTH)
@@ -56,8 +178,6 @@ def main(screen: pygame.Surface):
     game_speed = 14
 
     obstacles = []
-
-    death_count = 0
 
     x_pos_background = 0
     y_pos_background = 380
@@ -84,15 +204,32 @@ def main(screen: pygame.Surface):
             x_pos_background = 0
         x_pos_background -= game_speed
 
+
+
     start_time = time.time()
 
     while run:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 run = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_q:
+                    run = False
+
 
         screen.fill((255, 255, 255))
-        userInput = pygame.key.get_pressed()
+        userInput = {pygame.K_UP: False, pygame.K_DOWN: False}
+        # 점프 0 뛰어 1 숙여 2 nothing 4
+        if time.time() - start_time >= 1.0:
+            command = command_queue.get()
+            if command == 0 or command == 1:
+                userInput[pygame.K_UP] = True
+            elif command == 2:
+                userInput[pygame.K_DOWN] = True
+            start_time = time.time()
+
+        print(f'keyUP: {userInput[pygame.K_UP]}, keyDown: {userInput[pygame.K_DOWN]}')
+
 
         background()
 
@@ -103,25 +240,6 @@ def main(screen: pygame.Surface):
         cloud.update(game_speed)
 
         score()
-
-        # start recording (use busy waiting)
-        if time.time() - start_time >= 0.25:
-            listener = AudioCapture.ready_queue.pop(0)
-            listener.is_ready = False
-            AudioCapture.running_queue.append(listener)
-            listener.is_running = True
-            listener.is_listening = True
-            start_time = time.time()
-        # check running queue
-        while True:
-            task = AudioCapture.running_queue[0]
-            if task.is_running:
-                break
-            # not running
-            AudioCapture.ready_queue.append(task)
-            _ = AudioCapture.running_queue.pop(0)
-
-        # do depending on output result
 
         if len(obstacles) == 0:
             if random.randint(0, 2) == 0:
@@ -135,20 +253,26 @@ def main(screen: pygame.Surface):
             obstacle.draw(screen)
             obstacle.update(game_speed, obstacles)
             if player.dino_rect.colliderect(obstacle.rect):
-                #pygame.draw.rect(screen, (255, 0, 0), player.dino_rect, 2)
+                pygame.draw.rect(screen, (255, 0, 0), player.dino_rect, 2)
+                '''
                 pygame.time.delay(200)
                 death_count += 1
                 menu(death_count)
+                '''
+
 
         clock.tick(30)
         pygame.display.update()
 
 
 def menu(death_count: int):
-    global points, run, capture_dict, threads_list
+    global points, run, record
 
-    # capture = AudioCapture(filename='./test.wav', sr=16000, channel_num=1)
-
+    record = False
+    stream = pypy.open(format=pyaudio.paInt16, channels=1, rate=SR, input=True, input_device_index=device_index, frames_per_buffer=CHUNK_SIZE)
+    streaming = threading.Thread(target=start_stream, args=(Queue_audio, stream))
+    kws_spotting = threading.Thread(target=start_KWS, args=(Queue_audio, model))
+    
     while run:
         screen.fill((255, 255, 255))
         font = pygame.font.SysFont('arial', 25, True, True)
@@ -170,19 +294,19 @@ def menu(death_count: int):
             if event.type == pygame.QUIT:
                 run = False
             if event.type == pygame.KEYDOWN:
-                for i, capture in enumerate(capture_dict.values()):
-                    capture.capture_audio = True
-                    capture.capture_audio = True
-                    AudioCapture.ready_queue.append(capture)
-                    threads_list.append(threading.Thread(target=capture.listen, args=(1, ), name=f'listen_{i}'))
-                for listener in threads_list:
-                    listener.start()
+                record = True
+                streaming.start()
+                kws_spotting.start()
                 main(screen)
-                for capture in capture_dict.values():
-                    capture.capture_audio = False
-                for listener in threads_list:
-                    listener.join()
+                streaming.join()
+                kws_spotting.join()
+                
 
+pypy = pyaudio.PyAudio()
+check_audio_env(pypy)
+
+print('Enter recording device number:', end='')
+device_index = int(sys.stdin.readline())
 
 menu(death_count=0)
 pygame.quit()
