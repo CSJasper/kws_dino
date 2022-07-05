@@ -26,6 +26,7 @@ SCREEN_HEIGHT = 600
 SCREEN_WIDTH = 1100
 TEST = True
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+death_count = 0
 
 points = 0
 run = True
@@ -168,7 +169,7 @@ def get_audio_env_list(pypy):
 
 
 def main(screen: pygame.Surface):
-    global SCREEN_WIDTH, points, run, record
+    global SCREEN_WIDTH, points, run, record, death_count
     clock = pygame.time.Clock()
     player = Dinosaur()
     cloud = Cloud(SCREEN_WIDTH)
@@ -251,25 +252,27 @@ def main(screen: pygame.Surface):
             obstacle.draw(screen)
             obstacle.update(game_speed, obstacles)
             if player.dino_rect.colliderect(obstacle.rect):
-                pygame.draw.rect(screen, (255, 0, 0), player.dino_rect, 2)
-                '''
+                #pygame.draw.rect(screen, (255, 0, 0), player.dino_rect, 2)
                 pygame.time.delay(200)
                 death_count += 1
-                menu(death_count)
-                '''
+                menu()
 
-
-        clock.tick(60)
+        fps = str(int(clock.get_fps()))
+        color = 'black'
+        fps_text = pygame.font.SysFont('Arial', 30).render(fps, 0, pygame.Color(color))
+        screen.blit(fps_text, (10, 10))
+        clock.tick(30)
         pygame.display.update()
 
 
-def menu(death_count: int):
-    global points, run, record
+def menu():
+    global points, run, record, death_count
 
     record = False
     stream = pypy.open(format=pyaudio.paInt16, channels=1, rate=SR, input=True, input_device_index=device_index, frames_per_buffer=CHUNK_SIZE)
     streaming = threading.Thread(target=start_stream, args=(Queue_audio, stream))
     kws_spotting = threading.Thread(target=start_KWS, args=(Queue_audio, model))
+    m_thr = threading.Thread(target=main, args=(screen, ))
     
     while run:
         screen.fill((255, 255, 255))
@@ -306,5 +309,5 @@ check_audio_env(pypy)
 print('Enter recording device number:', end='')
 device_index = int(sys.stdin.readline())
 
-menu(death_count=0)
+menu()
 pygame.quit()
